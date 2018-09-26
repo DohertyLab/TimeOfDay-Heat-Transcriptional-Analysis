@@ -1,0 +1,753 @@
+---
+title: "HSP_Scripts"
+author: "Dmitry Grinevich"
+date: "3/21/2018"
+output: html_document
+---
+All required R scripts for analysis are found in "Scripts" folder. Regular loaded data files are found in "Analysis Files", and GO Data files from Panther are found in "GO Files". 
+Load required packages:
+```{r}
+require(ggplot2)
+require(DESeq2)
+require(VennDiagram)
+require(stringr)
+require(ontoCAT)
+require(pheatmap)
+require(stats)
+```
+Table formatting for physiology Figure 1, in preparation for input into ggplot2. 
+```{r}
+RawTemp<-read.table(file = "GG_Input_Fig1.txt",sep = "\t",stringsAsFactors = FALSE)
+#CutTemp<-RawTemp[c(1,2,5,6,9,10,13,14,17,18,21,22,25,27),]
+Temp_Matrix<-as.matrix(RawTemp)
+colnames(Temp_Matrix)=c("Temp","Time","Level")
+Fig2Table<-as.data.frame(Temp_Matrix)
+Fig2Table$Temp <- as.numeric(as.character(Fig2Table$Temp))
+Fig2Table$Time<-gsub("8A","Dawn",Fig2Table$Time)
+Fig2Table$Time<-gsub("8P","Dusk",Fig2Table$Time)
+Fig2Table$Time<-gsub("2A","Midnight",Fig2Table$Time)
+Fig2Table$Time<-gsub("2P","Midday",Fig2Table$Time)
+Fig2Table$Time<-factor(Fig2Table$Time,levels=c("Dawn","Midday","Dusk","Midnight"))
+Fig2Table$Level<-gsub("Not Acclimated","Basal",Fig2Table$Level)
+Fig2Table$Level<-factor(Fig2Table$Level,levels=c("Basal","Acclimated"))
+ColorLabels<-rep(c("8A_B","8A_A","2P_B","2P_A","8P_B","8P_A","2A_B","2A_A"),3)
+Fig2Table<-cbind(ColorLabels,Fig2Table)
+Fig2Table$ColorLabels<-factor(Fig2Table$ColorLabels,levels=c("8A_B","8A_A","2P_B","2P_A","8P_B","8P_A","2A_B","2A_A"))
+Fig2Table$Temp<-as.numeric(as.character(Fig2Table$Temp))
+```
+ggplot2 command in order to plot barplots of physiology data.
+```{r}
+ggplot(Fig2Table, aes(x = Time, fill = Level, y = Temp)) +
+  geom_boxplot(binaxis = "y",position = position_dodge(width=0.7),stackdir = "center",width=0.5)+
+  theme_bw()+
+  xlab("Time of Day")+
+  ylab("Maximum Measured Survival Temperature")+
+  scale_fill_manual(values=c('gold1','firebrick1'),labels=c("Untreated","Pretreated"),name="Heat Tolerance State")+
+  theme(axis.text.x = element_text(face="bold", size=12),axis.title.y=element_text(size=16,face="bold",margin=margin(t = 0, r = 20, b = 0, l = 0)),axis.text.y = element_text(face="bold", size=12),axis.title.x = element_text(size=16,face="bold",margin=margin(t = 10, r = 0, b = 0, l = 0)))+
+  scale_y_continuous(limits = c(40,50),breaks = c(40,42,44,46,48,50))
+```
+The following scripts describe the methods for generating the standard categorization of our RNA-seq data. The counttable is obtained using HTseq-count data, and the design table is generated outside of R and then loaded in. We use the countfilter function to remove unwanted samples. The countfilter removes genes which do not possess at least 10 counts in at least 1 sample (looking across all replicates of all samples). After filtering, the tables are formatted for input in DESeq2. 
+```{r}
+load("FULLCOUNTTABLE.Rdata")
+load("FULLDESIGNTABLE.Rdata")
+source('CountFilter.R')
+#Low count filter is set to 10 for this analysis
+LowCounts<-apply(counttable,1,CountFilter)
+FilteredCountTable<-counttable[which(LowCounts),]
+FinalCountTable<-FilteredCountTable[,1:16]
+rownames(DesignTable)=DesignTable[,1]
+colnames(DesignTable)<-c("Sample","Condition","Time","Group")
+DesignTable<-DesignTable[,2:3]
+AMDesignTable<-DesignTable[c(1:4,9:12),]
+PMDesignTable<-DesignTable[c(5:8,13:16),]
+AMCountTable<-counttable[,c(1:4,9:12)]
+PMCountTable<-counttable[,c(5:8,13:16)]
+```
+The following lines run the DESeq2 commands to generate differential expression data. AM and PM differentially expressed genes are determined separately. Design parameter for differential expression is comparing control vs. treatment (Condition can be heat untreated or heat treated).
+```{r}
+AMdds<-DESeqDataSetFromMatrix(countData = AMCountTable,
+                            colData = AMDesignTable,
+                            design = ~ Condition)
+PMdds<-DESeqDataSetFromMatrix(countData = PMCountTable,
+                              colData = PMDesignTable,
+                              design = ~ Condition)
+AMDESeq<-DESeq(AMdds)
+PMDESeq<-DESeq(PMdds)
+```
+The next lines are used to group the results of the expression data. We are interested in determining which genes are differentially expressed at both times of day, AM specifically, and PM specifically. Additionally, we need to determine directionality of change for each time. Differentially expressed genes are called by adjusted p-value < 0.05 and log-fold change greater than 0.5 (+ or -). Directionality of differential expression is called by the sign of the fold change (+ for upregulated and - for downregulated).
+```{r}
+AMDEGenes<-results(AMDESeq,contrast = c("Condition","treated","untreated"))
+AMDEGenesSorted<-AMDEGenes[order(AMDEGenes$padj),]
+AMDEGeneList<-as.data.frame(AMDEGenesSorted)
+AM_Sig<-AMDEGeneList[which(AMDEGeneList$padj<0.05),]
+AM_Strong<-AM_Sig[which(AM_Sig$log2FoldChange>0.5 | AM_Sig$log2FoldChange< -0.5),]
+AM_Strong_Up<-AM_Strong[which(AM_Strong$log2FoldChange>0),]
+AM_Strong_Down<-AM_Strong[which(AM_Strong$log2FoldChange<0),]
+PMDEGenes<-results(PMDESeq,contrast = c("Condition","treated","untreated"))
+PMDEGenesSorted<-PMDEGenes[order(PMDEGenes$padj),]
+PMDEGeneList<-as.data.frame(PMDEGenesSorted)
+PM_Sig<-PMDEGeneList[which(PMDEGeneList$padj<0.05),]
+PM_Strong<-PM_Sig[which(PM_Sig$log2FoldChange>0.5 | PM_Sig$log2FoldChange< -0.5),]
+PM_Strong_Up<-PM_Strong[which(PM_Strong$log2FoldChange>0),]
+PM_Strong_Down<-PM_Strong[which(PM_Strong$log2FoldChange<0),]
+Intersect<-intersect(rownames(AM_Strong),rownames(PM_Strong))
+Both_Strong<-AM_Strong[Intersect,]
+Both_Strong<-PM_Strong[Intersect,]
+Both_Strong_Up<-Both_Strong[which(Both_Strong$log2FoldChange>0),]
+Both_Strong_Down<-Both_Strong[which(Both_Strong$log2FoldChange<0),]
+source('Outersect.R')
+AM_Spec<-outersect(rownames(AM_Strong),rownames(Both_Strong))
+PM_Spec<-outersect(rownames(PM_Strong),rownames(Both_Strong))
+AM_Specific_Up<-AM_Strong_Up[AM_Spec,]
+AM_Specific_Up<-AM_Specific_Up[complete.cases(AM_Specific_Up),]
+AM_Specific_Down<-AM_Strong_Down[AM_Spec,]
+AM_Specific_Down<-AM_Specific_Down[complete.cases(AM_Specific_Down),]
+PM_Specific_Up<-PM_Strong_Up[PM_Spec,]
+PM_Specific_Up<-PM_Specific_Up[complete.cases(PM_Specific_Up),]
+PM_Specific_Down<-PM_Strong_Down[PM_Spec,]
+PM_Specific_Down<-PM_Specific_Down[complete.cases(PM_Specific_Down),]
+write.table(AM_Specific_Up,file = "AM_Specific_Up.csv",sep = "\t")
+write.table(PM_Specific_Up,file = "PM_Specific_Up.csv",sep = "\t")
+write.table(AM_Specific_Down,file = "AM_Specific_Down.csv",sep = "\t")
+write.table(PM_Specific_Down,file = "PM_Specific_Down.csv",sep = "\t")
+write.table(Both_Strong_Up,file = "BOTH_Specific_Up.csv",sep = "\t")
+write.table(Both_Strong_Down,file = "BOTH_Specific_Down.csv",sep = "\t")
+```
+Plotting functions for venn diagrams in standard categorization. The first command generates the overall venn diagram. The second command generates the venn diagram for upregulated genes. The third command generates the venn diagram for downregulated genes. 
+```{r}
+venn.diagram(list(GeneSet1=rownames(PM_Strong),GeneSet2=rownames(AM_Strong)), filename = "./Venn_FULL.png", imagetype = "png", fill = c("dodgerblue","firebrick1"), cex = 1.5, fontface = "bold", cat.cex = 1.5, cat.fontface = "bold", euler.d=TRUE, scaled=TRUE,inverted=TRUE, category.names="")
+
+venn.diagram(list(GeneSet1=rownames(AM_Strong_Up),GeneSet2=rownames(PM_Strong_Up)), filename = "./Venn_UP.png", imagetype = "png", fill = c("firebrick1","dodgerblue"), cex = 1.5, fontface = "bold", cat.cex = 1.5, cat.fontface = "bold", euler.d=TRUE, scaled=TRUE,inverted=FALSE, category.names="",rotation.degree = 180)
+
+venn.diagram(list(GeneSet1=rownames(AM_Strong_Down),GeneSet2=rownames(PM_Strong_Down)), filename = "./Venn_DOWN.png", imagetype = "png", fill = c("firebrick1","dodgerblue"), cex = 1.5, fontface = "bold", cat.cex = 1.5, cat.fontface = "bold", euler.d=TRUE, scaled=TRUE,inverted=FALSE, category.names="",rotation.degree = 0)
+```
+Single gene plots are generated throughout the manuscript using the following code. First, the counttable is converted into counts per million. 
+```{r}
+load("FULLCOUNTTABLE.Rdata")
+Raw_CountTable<-counttable[,1:16]
+SUMS<-apply(Raw_CountTable,2,sum)
+CPM_Table<-sapply(1:16,function(x) Raw_CountTable[,x]/SUMS[x]*1000000)
+colnames(CPM_Table)=colnames(Raw_CountTable)
+rownames(CPM_Table)=rownames(Raw_CountTable)
+```
+The Single Gene Plotter script is used to search the table and generate the plot. Parameter "Gene" requires the Arabidopsis locus of interest, "Y Axis Scaler" is a number adjusted based on the maximum expression of the gene to set the y-axis scale, "Gene_Name" sets the title of the plot.
+```{r}
+source('Single_Gene_Plotter.R')
+GGG_PlotDaddy(Gene = "AT3G59060",Y_Axis_Scaler = 200,Gene_Name = "PIF5")
+```
+The following scripts describe the methods for generating the refined categorization of our RNA-seq data. The counttable is obtained using HTseq-count data, and the design table is generated outside of R and then loaded in. We use the countfilter function to remove unwanted samples. The countfilter removes genes which do not possess at least 10 counts in at least 1 sample (looking across all replicates of all samples). After filtering, the tables are formatted for input in DESeq2. 
+```{r}
+load("FULLCOUNTTABLE.Rdata")
+load("FULLDESIGNTABLE.Rdata")
+source('CountFilter.R')
+#Low count filter is set to 10 for this analysis
+LowCounts<-apply(counttable,1,CountFilter)
+FilteredCountTable<-counttable[which(LowCounts),]
+FinalCountTable<-FilteredCountTable[,1:16]
+rownames(DesignTable)=DesignTable[,1]
+colnames(DesignTable)<-c("Sample","Condition","Time","Group")
+DesignTable<-DesignTable[,2:3]
+save(FinalCountTable,DesignTable,file="RawEntryTables.Rdata")
+```
+The important difference between the standard categorization analysis and this refined analysis is the linear model design inputs. In this analysis, we allow the linear model to consider all 4 groups simultaneously (Control-AM, Control-PM, Heat-AM, Heat-PM). These groupings are labeled in the design table by the ~Group parameter. 
+```{r}
+dds<-DESeqDataSetFromMatrix(countData = FinalCountTable,
+                            colData = DesignTable,
+                            design = ~ Group)
+#Generate AM DE Genes
+DESeq<-DESeq(dds)
+AMDEGenes<-results(DESeq,contrast = c("Group","H_AM","C_AM"))
+AMDEGenesSorted<-AMDEGenes[order(AMDEGenes$padj),]
+AMDEGeneList<-as.data.frame(AMDEGenesSorted)
+AMDEGeneListTREE<-AMDEGeneList[,c(2,1,4,5,6)]
+#Generate PM DE Genes
+PMDEGenes<-results(DESeq,contrast = c("Group","H_PM","C_PM"))
+PMDEGenesSorted<-PMDEGenes[order(PMDEGenes$padj),]
+PMDEGeneList<-as.data.frame(PMDEGenesSorted)
+PMDEGeneListTREE<-PMDEGeneList[,c(2,1,4,5,6)]
+#Generate Control DE Genes (for basal differences)
+CTRLDEGenes<-results(DESeq,contrast = c("Group","C_PM","C_AM"))
+CTRLDEGenesSorted<-CTRLDEGenes[order(CTRLDEGenes$padj),]
+CTRLDEGeneList<-as.data.frame(CTRLDEGenesSorted)
+CTRLDEGeneListTREE<-CTRLDEGeneList[,c(2,1,4,5,6)]
+#Save all outputs
+save(AMDEGeneList,AMDEGeneListTREE,file="DESeqOutputsAM.Rdata")
+save(PMDEGeneList,PMDEGeneListTREE,file="DESeqOutputsPM.Rdata")
+save(CTRLDEGeneList,CTRLDEGeneListTREE,file="DESeqOutputsCTRL.Rdata")
+```
+The following lines are used to generate the group splitting for the refined diagram. It requires input of differential expression between control samples for basal differences, then differential expression at AM and PM seperately. An important note about this script is that it also categorizes genes into categories which go up in one condition and down in the other (i.e. Up AM and Down PM). All of these categories in our final tree were excluded because they did not pass the criteria of having at least 10 genes per group. This plot is generated manually outside of R by plotting group numbers over example graphs of each pattern. 
+```{r}
+source('TreeDiagramScript.R')
+FullTreeList<-dbasel_DE_function(Control_AMvsPM = CTRLDEGeneListTREE,Cvsh_AM = AMDEGeneListTREE,Cvsh_PM = PMDEGeneListTREE)
+save(FullTreeList,file="TreeOutput.Rdata")
+```
+The following lines are used to generate the differential expression data for the interaction term genes. These are the strongest candidates which have a time of day dependence in their response to the heat treatment. The counttable is obtained using HTseq-count data, and the design table is generated outside of R and then loaded in. We use the countfilter function to remove unwanted samples. The countfilter removes genes which do not possess at least 10 counts in at least 1 sample (looking across all replicates of all samples). After filtering, the tables are formatted for input in DESeq2. 
+```{r}
+load("FULLCOUNTTABLE.Rdata")
+load("FULLDESIGNTABLE.Rdata")
+source('CountFilter.R')
+#Low count filter is set to 10 for this analysis
+LowCounts<-apply(counttable,1,CountFilter)
+FilteredCountTable<-counttable[which(LowCounts),]
+FinalCountTable<-FilteredCountTable[,1:16]
+save(FinalCountTable,DesignTable,file="RawEntryTables.Rdata")
+rownames(DesignTable)=DesignTable[,1]
+DesignTable<-DesignTable[,2:4]
+```
+The important difference for the interaction analysis is the design input for the linear model. We use (Condition + Time + Condition:Time) which will consider the effect of the treatment (Condition) the time of day of treatment (Time) and the combination of the two effects together (Condition:Time).
+```{r}
+dds<-DESeqDataSetFromMatrix(countData = FinalCountTable,
+                            colData = DesignTable,
+                            design = ~ Condition + Time + Condition:Time)
+DESeq<-DESeq(dds)
+DEGenes<-results(DESeq,contrast = list("Conditionuntreated.TimePM"))
+DEGenesSorted<-DEGenes[order(DEGenes$padj),]
+DEGeneList<-as.data.frame(DEGenesSorted)
+DEGeneListTREE<-DEGeneList[,c(2,1,4,5,6)]
+ITERMDEGenes<-DEGeneListTREE
+ITERMDEGenesPVAL<-ITERMDEGenes[which(ITERMDEGenes$padj<0.05),]
+save(ITERMDEGenesPVAL,file="ITERM.Rdata")
+write.table(ITERMDEGenesPVAL,file="ITERMGenes.csv",sep = "\t")
+PM_ITERM<-ITERMDEGenesPVAL[which(ITERMDEGenesPVAL$log2FoldChange<0),]
+AM_ITERM<-ITERMDEGenesPVAL[which(ITERMDEGenesPVAL$log2FoldChange>0),]
+#These lines are used to determine which genes are transcription factors using a reference table of all Arabidopsis transcription factors. 
+load("TF_lists.Rdata")
+rownames(TF_geneIDlist1)<-TF_geneIDlist1[,2]
+ITERM_TFs<-intersect(rownames(TF_geneIDlist1),rownames(ITERMDEGenesPVAL))
+ITERM_TFs_Table<-ITERMDEGenesPVAL[ITERM_TFs,]
+write.table(ITERM_TFs_Table,file="ITERMTFs.csv",sep = "\t")
+```
+The following lines are used to calculate the enrichment in the overlap of our detected heat shock genes upregulated and downregulated at AM and previously detected genes from (Nguyen et al., 2014). The two results are displayed at the bottom for upregulated genes at AM first and then downregulated genes at AM. 
+```{r}
+Example_Data_Full<-read.table(file = "Example_HS_Data.txt",sep = "\t",stringsAsFactors = FALSE)
+colnames(Example_Data_Full)=Example_Data_Full[1,]
+Example_Data_Full<-Example_Data_Full[-1,]
+Example_Data_Full$adj.P.Val<-as.numeric(Example_Data_Full$adj.P.Val)
+
+#These two files are generated earlier during the refined categorization analysis
+hPM_DE_upAM<-read.table(file="hPM_DE_upAM.txt",sep="\t",stringsAsFactors = FALSE)
+hAM_DE_dwAM<-read.table(file="hAM_DE_dwAM.txt",sep="\t",stringsAsFactors = FALSE)
+
+Example_Data_FullUP<-Example_Data_Full[which(Example_Data_Full$logFC>0),]
+Example_Data_SigUP<-Example_Data_FullUP[which(Example_Data_FullUP$adj.P.Val<0.005),]
+Example_Data_SigUP$logFC<-as.numeric(Example_Data_SigUP$logFC)
+Example_Data_FinalUP<-Example_Data_SigUP[which(Example_Data_SigUP$logFC>0.5),]
+
+length(intersect(Example_Data_FinalUP$ID,hPM_DE_upAM$V1))
+#phyper for hPM_DE_upAM
+exp(phyper(34,6921,32788-6921,88,lower.tail = FALSE,log.p = TRUE))
+#final result is e^-9.852432 = 5.26 E-5
+
+Example_Data_FullDW<-Example_Data_Full[which(Example_Data_Full$logFC<0),]
+Example_Data_SigDW<-Example_Data_FullDW[which(Example_Data_FullDW$adj.P.Val<0.005),]
+Example_Data_SigDW$logFC<-as.numeric(Example_Data_SigDW$logFC)
+Example_Data_FinalDW<-Example_Data_SigDW[which(Example_Data_SigDW$logFC< -0.5),]
+
+length(intersect(Example_Data_FinalDW$ID,hAM_DE_dwAM$V1))
+#phyper for hAM_DE_dwAM
+exp(phyper(98,5970,32788-5970,183,lower.tail = FALSE,log.p = TRUE))
+#final result is e^-62.34494 = 8.39E-28
+```
+The following lines are used to generate the gene lists for generation of the cytoscape network. The first block generates the upregulated genes, with AM and PM specific upregulation, followed by all upregulated AM and PM genes (these lists incude the BOTH group). The second block repeats the same code but generates all of the downregulated genes. Tables were then exported and inputted into cytoscape for network generation. Cytoscape network figures were generated using the appropriate up- or down-regulated gene lists by being inputted in the BINGO extension. 
+```{r}
+PMUPGenes<-c(as.vector(FullTreeList$hAM_DE_upPM$gene),as.vector(FullTreeList$hPM_DE_upPM$gene),as.vector(FullTreeList$eq_DE_upPM$gene))
+AMUPGenes<-c(as.vector(FullTreeList$hAM_DE_upAM$gene),as.vector(FullTreeList$hPM_DE_upAM$gene),as.vector(FullTreeList$eq_DE_upAM$gene))
+BOTHUPGenes<-c(as.vector(FullTreeList$hAM_DE_upBOTH$gene),as.vector(FullTreeList$hPM_DE_upBOTH$gene),as.vector(FullTreeList$eq_DE_upBOTH$gene))
+PMCytoscape<-as.data.frame(PMUPGenes)
+AMCytoscape<-as.data.frame(AMUPGenes)
+BOTHCytoscape<-as.data.frame(BOTHUPGenes)
+write.table(PMCytoscape,file = "u_PMCytoscape.csv",sep = "\t")
+write.table(AMCytoscape,file = "u_AMCytoscape.csv",sep = "\t")
+write.table(BOTHCytoscape,file = "u_BOTHCytoscape.csv",sep = "\t")
+AM_FULL<-c(AMUPGenes,BOTHUPGenes)
+PM_FULL<-c(PMUPGenes,BOTHUPGenes)
+write.table(AM_FULL,file = "u_AM_FULLCytoscape.csv",sep = "\t")
+write.table(PM_FULL,file = "u_PM_FULLCytoscape.csv",sep = "\t")
+#Same process for downregulated genes
+PMDOWNGenes<-c(as.vector(FullTreeList$hAM_DE_dwPM$gene),as.vector(FullTreeList$hPM_DE_dwPM$gene),as.vector(FullTreeList$eq_DE_dwPM$gene))
+AMUPGenes<-c(as.vector(FullTreeList$hAM_DE_dwAM$gene),as.vector(FullTreeList$hPM_DE_dwAM$gene),as.vector(FullTreeList$eq_DE_dwAM$gene))
+BOTHDOWNGenes<-c(as.vector(FullTreeList$hAM_DE_dwBOTH$gene),as.vector(FullTreeList$hPM_DE_dwBOTH$gene),as.vector(FullTreeList$eq_DE_dwBOTH$gene))
+d_PMCytoscape<-as.data.frame(PMDOWNGenes)
+d_AMCytoscape<-as.data.frame(AMUPGenes)
+d_BOTHCytoscape<-as.data.frame(BOTHDOWNGenes)
+write.table(d_PMCytoscape,file = "d_PMCytoscape.csv",sep = "\t")
+write.table(d_AMCytoscape,file = "d_AMCytoscape.csv",sep = "\t")
+write.table(d_BOTHCytoscape,file = "d_BOTHCytoscape.csv",sep = "\t")
+d_AM_FULL<-c(AMUPGenes,BOTHDOWNGenes)
+d_PM_FULL<-c(PMDOWNGenes,BOTHDOWNGenes)
+write.table(d_AM_FULL,file = "d_AM_FULLCytoscape.csv",sep = "\t")
+write.table(d_PM_FULL,file = "d_PM_FULLCytoscape.csv",sep = "\t")
+```
+The following lines are used to do the GO comparison analysis used to compare the GO data obtained from the refined categorization and standard categorization. These lines will extract the information needed from Panther GO data in order to compare GO groups observed in each type of analysis. 
+```{r}
+#Read in GO data files for both venn diagram groups and refined categorization groups separately. GO analysis is generated outside of R using Panther tool (www.pantherdb.org). Files can be accessed in github folder "GO Files".
+Venn_upAM<-read.table(file="Venn_upAM.txt",sep="\t",stringsAsFactors = FALSE,quote="")
+Venn_dwAM<-read.table(file="Venn_dwAM.txt",sep="\t",stringsAsFactors = FALSE,quote="")
+Venn_upPM<-read.table(file="Venn_upPM.txt",sep="\t",stringsAsFactors = FALSE,quote="")
+Venn_dwPM<-read.table(file="Venn_dwPM.txt",sep="\t",stringsAsFactors = FALSE,quote="")
+Venn_upBOTH<-read.table(file="Venn_bothUP.txt",sep="\t",stringsAsFactors = FALSE,quote="")
+Venn_dwBOTH<-read.table(file="Venn_bothDOWN.txt",sep="\t",stringsAsFactors = FALSE,quote="")
+GO_eq_upAM<-read.table(file="eq_upAM.txt",sep="\t",stringsAsFactors = FALSE,quote="")
+GO_eq_dwAM<-read.table(file="eq_dwAM.txt",sep="\t",stringsAsFactors = FALSE,quote="")
+GO_eq_upPM<-read.table(file="eq_upPM.txt",sep="\t",stringsAsFactors = FALSE,quote="")
+GO_eq_dwPM<-read.table(file="eq_dwPM.txt",sep="\t",stringsAsFactors = FALSE,quote="")
+GO_eq_upBOTH<-read.table(file="eq_upBOTH.txt",sep="\t",stringsAsFactors = FALSE,quote="")
+GO_eq_dwBOTH<-read.table(file="eq_dwBOTH.txt",sep="\t",stringsAsFactors = FALSE,quote="")
+GO_hAM_upAM<-read.table(file="hAM_upAM.txt",sep="\t",stringsAsFactors = FALSE,quote="")
+GO_hAM_dwAM<-read.table(file="hAM_dwAM.txt",sep="\t",stringsAsFactors = FALSE,quote="")
+GO_hAM_upPM<-read.table(file="hAM_upPM.txt",sep="\t",stringsAsFactors = FALSE,quote="")
+GO_hAM_dwPM<-read.table(file="hAM_dwPM.txt",sep="\t",stringsAsFactors = FALSE,quote="")
+GO_hAM_upBOTH<-read.table(file="hAM_upBOTH.txt",sep="\t",stringsAsFactors = FALSE,quote="")
+GO_hAM_dwBOTH<-read.table(file="hAM_dwBOTH.txt",sep="\t",stringsAsFactors = FALSE,quote="")
+#Convert Number Values to Numeric from strings
+Venn_upAM$V7<-as.numeric(as.character(Venn_upAM$V7))
+Venn_dwAM$V7<-as.numeric(as.character(Venn_dwAM$V7))
+Venn_upPM$V7<-as.numeric(as.character(Venn_upPM$V7))
+Venn_dwPM$V7<-as.numeric(as.character(Venn_dwPM$V7))
+Venn_upBOTH$V7<-as.numeric(as.character(Venn_upBOTH$V7))
+Venn_dwBOTH$V7<-as.numeric(as.character(Venn_dwBOTH$V7))
+GO_eq_upAM$V7<-as.numeric(as.character(GO_eq_upAM$V7))
+GO_eq_dwAM$V7<-as.numeric(as.character(GO_eq_dwAM$V7))
+GO_eq_upPM$V7<-as.numeric(as.character(GO_eq_upPM$V7))
+GO_eq_dwPM$V7<-as.numeric(as.character(GO_eq_dwPM$V7))
+GO_eq_upBOTH$V7<-as.numeric(as.character(GO_eq_upBOTH$V7))
+GO_eq_dwBOTH$V7<-as.numeric(as.character(GO_eq_dwBOTH$V7))
+GO_hAM_upAM$V7<-as.numeric(as.character(GO_hAM_upAM$V7))
+GO_hAM_dwAM$V7<-as.numeric(as.character(GO_hAM_dwAM$V7))
+GO_hAM_upPM$V7<-as.numeric(as.character(GO_hAM_upPM$V7))
+GO_hAM_dwPM$V7<-as.numeric(as.character(GO_hAM_dwPM$V7))
+GO_hAM_upBOTH$V7<-as.numeric(as.character(GO_hAM_upBOTH$V7))
+GO_hAM_dwBOTH$V7<-as.numeric(as.character(GO_hAM_dwBOTH$V7))
+#Formatting is done to clean up these lists. Assignment of rownames.
+rownames(Venn_upAM)<-Venn_upAM[,1]
+rownames(Venn_dwAM)<-Venn_dwAM[,1]
+rownames(Venn_upPM)<-Venn_upPM[,1]
+rownames(Venn_dwPM)<-Venn_dwPM[,1]
+rownames(Venn_upBOTH)<-Venn_upBOTH[,1]
+rownames(Venn_dwBOTH)<-Venn_dwBOTH[,1]
+rownames(GO_hAM_upAM)<-GO_hAM_upAM[,1]
+rownames(GO_hAM_dwAM)<-GO_hAM_dwAM[,1]
+rownames(GO_hAM_upPM)<-GO_hAM_upPM[,1]
+rownames(GO_hAM_dwPM)<-GO_hAM_dwPM[,1]
+rownames(GO_hAM_upBOTH)<-GO_hAM_upBOTH[,1]
+rownames(GO_hAM_dwBOTH)<-GO_hAM_dwBOTH[,1]
+rownames(GO_eq_upAM)<-GO_eq_upAM[,1]
+rownames(GO_eq_dwAM)<-GO_eq_dwAM[,1]
+rownames(GO_eq_upPM)<-GO_eq_upPM[,1]
+rownames(GO_eq_dwPM)<-GO_eq_dwPM[,1]
+rownames(GO_eq_upBOTH)<-GO_eq_upBOTH[,1]
+rownames(GO_eq_dwBOTH)<-GO_eq_dwBOTH[,1]
+#Pulls out numeric vectors
+V_Venn_upAM<-as.numeric(Venn_upAM[,7])
+V_Venn_dwAM<-as.numeric(Venn_dwAM[,7])
+V_Venn_upPM<-as.numeric(Venn_upPM[,7])
+V_Venn_dwPM<-as.numeric(Venn_dwPM[,7])
+V_Venn_upBOTH<-as.numeric(Venn_upBOTH[,7])
+V_Venn_dwBOTH<-as.numeric(Venn_dwBOTH[,7])
+V_hAM_upAM<-as.numeric(GO_hAM_upAM[,7])
+V_hAM_dwAM<-as.numeric(GO_hAM_dwAM[,7])
+V_hAM_upPM<-as.numeric(GO_hAM_upPM[,7])
+V_hAM_dwPM<-as.numeric(GO_hAM_dwPM[,7])
+V_hAM_upBOTH<-as.numeric(GO_hAM_upBOTH[,7])
+V_hAM_dwBOTH<-as.numeric(GO_hAM_dwBOTH[,7])
+V_eq_upAM<-as.numeric(GO_eq_upAM[,7])
+V_eq_dwAM<-as.numeric(GO_eq_dwAM[,7])
+V_eq_upPM<-as.numeric(GO_eq_upPM[,7])
+V_eq_dwPM<-as.numeric(GO_eq_dwPM[,7])
+V_eq_upBOTH<-as.numeric(GO_eq_upBOTH[,7])
+V_eq_dwBOTH<-as.numeric(GO_eq_dwBOTH[,7])
+#Names the numeric vectors based on the GO term
+names(V_Venn_upAM)<-rownames(Venn_upAM)
+names(V_Venn_dwAM)<-rownames(Venn_dwAM)
+names(V_Venn_upPM)<-rownames(Venn_upPM)
+names(V_Venn_dwPM)<-rownames(Venn_dwPM)
+names(V_Venn_upBOTH)<-rownames(Venn_upBOTH)
+names(V_Venn_dwBOTH)<-rownames(Venn_dwBOTH)
+names(V_hAM_upAM)<-rownames(GO_hAM_upAM)
+names(V_hAM_dwAM)<-rownames(GO_hAM_dwAM)
+names(V_hAM_upPM)<-rownames(GO_hAM_upPM)
+names(V_hAM_dwPM)<-rownames(GO_hAM_dwPM)
+names(V_hAM_upBOTH)<-rownames(GO_hAM_upBOTH)
+names(V_hAM_dwBOTH)<-rownames(GO_hAM_dwBOTH)
+names(V_eq_upAM)<-rownames(GO_eq_upAM)
+names(V_eq_dwAM)<-rownames(GO_eq_dwAM)
+names(V_eq_upPM)<-rownames(GO_eq_upPM)
+names(V_eq_dwPM)<-rownames(GO_eq_dwPM)
+names(V_eq_upBOTH)<-rownames(GO_eq_upBOTH)
+names(V_eq_dwBOTH)<-rownames(GO_eq_dwBOTH)
+#Adds a naming factor that can be useful for apply functions.
+V_Venn_upAM[1]<-"V_Venn_upAM"
+V_Venn_dwAM[1]<-"V_Venn_dwAM"
+V_Venn_upPM[1]<-"V_Venn_upPM"
+V_Venn_dwPM[1]<-"V_Venn_dwPM"
+V_Venn_upBOTH[1]<-"V_Venn_upBOTH"
+V_Venn_dwBOTH[1]<-"V_Venn_dwBOTH"
+V_hAM_upAM[1]<-"V_hAM_upAM"
+V_hAM_dwAM[1]<-"V_hAM_dwAM"
+V_hAM_upPM[1]<-"V_hAM_upPM"
+V_hAM_dwPM[1]<-"V_hAM_dwPM"
+V_hAM_upBOTH[1]<-"V_hAM_upBOTH"
+V_hAM_dwBOTH[1]<-"V_hAM_dwBOTH"
+V_eq_upAM[1]<-"V_eq_upAM"
+V_eq_dwAM[1]<-"V_eq_dwAM"
+V_eq_upPM[1]<-"V_eq_upPM"
+V_eq_dwPM[1]<-"V_eq_dwPM"
+V_eq_upBOTH[1]<-"V_eq_upBOTH"
+V_eq_dwBOTH[1]<-"V_eq_dwBOTH"
+#Combine all formatted GO files into one big list.
+BIGLIST<-list()
+BIGLIST[[1]]<-V_Venn_upAM
+BIGLIST[[2]]<-V_Venn_dwAM
+BIGLIST[[3]]<-V_Venn_upPM
+BIGLIST[[4]]<-V_Venn_dwPM
+BIGLIST[[5]]<-V_Venn_upBOTH
+BIGLIST[[6]]<-V_Venn_dwBOTH
+BIGLIST[[7]]<-V_hAM_upAM
+BIGLIST[[8]]<-V_hAM_upPM
+BIGLIST[[9]]<-V_hAM_dwAM
+BIGLIST[[10]]<-V_hAM_dwPM
+BIGLIST[[11]]<-V_hAM_upBOTH
+BIGLIST[[12]]<-V_hAM_dwBOTH
+BIGLIST[[13]]<-V_eq_upAM
+BIGLIST[[14]]<-V_eq_dwAM
+BIGLIST[[15]]<-V_eq_upPM
+BIGLIST[[16]]<-V_eq_dwPM
+BIGLIST[[17]]<-V_eq_upBOTH
+BIGLIST[[18]]<-V_eq_dwBOTH
+names(BIGLIST)<-c("Venn_upAM","Venn_dwAM","Venn_upPM","Venn_dwPM","Venn_upBOTH","Venn_downBOTH","hAM_upAM","hAM_dwAM","hAM_upPM","hAM_dwPM","hAM_upBOTH","hAM_dwBOTH","eq_upAM","eq_dwAM","eq_upPM","eq_dwPM","eq_upBOTH","eq_dwBOTH")
+source('Grepper.R')
+source('CleanPVALVectors.R')
+#This function cleans up big list go names by converting them into searchable terms for later.
+BIGLISTCLEAN<-lapply(X = BIGLIST, function(x) CleanPVALVectors(x,RegularExp="GO\\:[:digit:]{7}"))
+#Choose PVAL cutoff for GO analysis.
+Cutoff<-0.01
+#The following lines filter high enrichment categories using the set cutoff.
+Venn_dwAM_cut<-Venn_dwAM[which(Venn_dwAM$V7<Cutoff),]
+Venn_dwPM_cut<-Venn_dwPM[which(Venn_dwPM$V7<Cutoff),]
+Venn_dwBOTH_cut<-Venn_dwBOTH[which(Venn_dwBOTH$V7<Cutoff),]
+Venn_upAM_cut<-Venn_upAM[which(Venn_upAM$V7<Cutoff),]
+Venn_upPM_cut<-Venn_upPM[which(Venn_upPM$V7<Cutoff),]
+Venn_upBOTH_cut<-Venn_upBOTH[which(Venn_upBOTH$V7<Cutoff),]
+GO_hAM_dwAM_cut<-GO_hAM_dwAM[which(GO_hAM_dwAM$V7<Cutoff),]
+GO_hAM_dwPM_cut<-GO_hAM_dwPM[which(GO_hAM_dwPM$V7<Cutoff),]
+GO_hAM_dwBOTH_cut<-GO_hAM_dwBOTH[which(GO_hAM_dwBOTH$V7<Cutoff),]
+GO_hAM_upAM_cut<-GO_hAM_upAM[which(GO_hAM_upAM$V7<Cutoff),]
+GO_hAM_upPM_cut<-GO_hAM_upPM[which(GO_hAM_upPM$V7<Cutoff),]
+GO_hAM_upBOTH_cut<-GO_hAM_upBOTH[which(GO_hAM_upBOTH$V7<Cutoff),]
+GO_eq_dwAM_cut<-GO_eq_dwAM[which(GO_eq_dwAM$V7<Cutoff),]
+GO_eq_dwPM_cut<-GO_eq_dwPM[which(GO_eq_dwPM$V7<Cutoff),]
+GO_eq_dwBOTH_cut<-GO_eq_dwBOTH[which(GO_eq_dwBOTH$V7<Cutoff),]
+GO_eq_upAM_cut<-GO_eq_upAM[which(GO_eq_upAM$V7<Cutoff),]
+GO_eq_upPM_cut<-GO_eq_upPM[which(GO_eq_upPM$V7<Cutoff),]
+GO_eq_upBOTH_cut<-GO_eq_upBOTH[which(GO_eq_upBOTH$V7<Cutoff),]
+#These lines generate GOCats which will be the enriched GO categories from the standard categorization.
+GOCats<-c(rownames(Venn_dwAM_cut),rownames(Venn_dwPM_cut),rownames(Venn_dwBOTH_cut),rownames(Venn_upAM_cut),rownames(Venn_upPM_cut),rownames(Venn_upBOTH_cut))
+#These lines generate BranchCats which will be enriched GO categories from the refined categorization.
+BranchCats<-c(rownames(GO_hAM_upAM_cut),rownames(GO_hAM_upPM_cut),rownames(GO_hAM_dwAM_cut),rownames(GO_hAM_dwPM_cut),rownames(GO_hAM_upBOTH_cut),rownames(GO_hAM_dwBOTH_cut),rownames(GO_eq_upAM_cut),rownames(GO_eq_dwAM_cut),rownames(GO_eq_upPM_cut),rownames(GO_eq_dwPM_cut),rownames(GO_eq_upBOTH_cut),rownames(GO_eq_dwBOTH_cut))
+GOCats<-unique(GOCats)
+BranchCats<-unique(BranchCats)
+source('Outersect.R')
+Overlap<-intersect(GOCats,BranchCats)
+BVennSpecific<-outersect(GOCats,Overlap)
+BranchSpecific<-outersect(BranchCats,Overlap)
+AllCats<-c(GOCats,BranchCats)
+AllCats<-unique(AllCats)
+#AllCats reports all enriched categories that overlaps between the refined and standard categorization.
+AllCats<-AllCats[-1]
+AllCatsCut<-str_extract(string = AllCats,pattern = "GO\\:[:digit:]{7}")
+#These lines generate the Gene Ontology reference file. GO.owl files are downloaded from a GO database.
+LetsGO<-getOntology("GO_Ontology.owl")
+AllAncestors<-sapply(AllCatsCut, function(x) get_ancestors(LetsGO,x))
+#Next line gets rid of first ancestors which is always biological process
+AllAncestorsTrim<-sapply(AllAncestors, function(x) x[-1])
+#This creates a reference of GO terms to GO terms + names, very useful!
+AllGONames<-unique(unlist(lapply(BIGLIST,function(x) names(x))))
+TempNames<-str_extract(string = AllGONames,pattern = "GO\\:[:digit:]{7}")
+names(AllGONames)=TempNames
+AllGONames<-AllGONames[!is.na(TempNames)]
+save(AllAncestors,BIGLISTCLEAN,AllGONames,file="FINAL_FILES.Rdata")
+AllAncestorsTrim2<-sapply(AllAncestorsTrim,function(x) x[-length(x)])
+GOProfile<-unlist(AllAncestorsTrim2)
+AncestorIndex<-names(AllAncestorsTrim)%in%GOProfile
+BestGOCats<-AllAncestorsTrim[!AncestorIndex]
+#The following loop will generate PDFs with all of the GO terms in a connected sequence.
+source('GOMasterPlotter.R')
+for (i in names(AllAncestorsTrim))
+{
+  PDFSize<-length(i)
+  pdf(file=paste(i,".pdf",sep=""),width = 10,height = 10)
+  par(mfrow=c(PDFSize,1),mar=c(8,3,1,1))
+  sapply(AllAncestorsTrim[[i]], function(x) GOMasterPlotter(x))
+  dev.off()
+}
+```
+The following lines are used to generate the GO comparison figure between the standard and refined categorization (Figure 5). The GO terms required for plotting must be inputted manually in the beginning to pull the correct p-value data from the appropriate GO term. Addition or removal of terms can be done by increasing or decreasing the size of the initial vector. 
+```{r}
+Vec1<-sapply(BIGLISTCLEAN,function (y) -log10(y["GO:0050896"]))
+Vec2<-sapply(BIGLISTCLEAN,function (y) -log10(y["GO:0009628"]))
+Vec3<-sapply(BIGLISTCLEAN,function (y) -log10(y["GO:0009314"]))
+Vec4<-sapply(BIGLISTCLEAN,function (y) -log10(y["GO:0009416"]))
+Vec5<-sapply(BIGLISTCLEAN,function (y) -log10(y["GO:0009642"]))
+Vec6<-sapply(BIGLISTCLEAN,function (y) -log10(y["GO:0009645"]))
+PVals<-c(Vec1,Vec2,Vec3,Vec4,Vec5,Vec6)
+CatNames<-c("Venn_upAM","Venn_dwAM","Venn_upPM","Venn_dwPM","Venn_upBOTH","Venn_downBOTH","hAM_upAM","hAM_dwAM","hAM_upPM","hAM_dwPM","hAM_upBOTH","hAM_dwBOTH","eq_upAM","eq_dwAM","eq_upPM","eq_dwPM","eq_upBOTH","eq_dwBOTH")
+Categorization<-c(CatNames,CatNames,CatNames,CatNames,CatNames,CatNames)
+GOCat<-c(rep("GO:0050896",18),rep("GO:0009628",18),rep("GO:0009314",18),rep("GO:0009416",18),rep("GO:0009642",18),rep("GO:0009645",18))
+MasterPlotTable<-cbind(PVals,Categorization,GOCat)
+MasterPlotTable<-as.data.frame(MasterPlotTable)
+MasterPlotTable$PVals <- as.numeric(as.character(MasterPlotTable$PVals))
+MasterPlotTable$Categorization <- factor(MasterPlotTable$Categorization, levels = CatNames)
+MasterPlotTable$GOCat <- factor(MasterPlotTable$GOCat, levels = c("GO:0050896","GO:0009628","GO:0009314","GO:0009416","GO:0009642","GO:0009645"))
+
+ggplot(data=MasterPlotTable, aes(x=Categorization, y=PVals, fill=GOCat))+
+  geom_bar(stat="identity", color="black", position=position_dodge())+
+  theme_classic()+
+  scale_fill_manual(values=c('gray70','gray70','firebrick1','firebrick1','firebrick1','firebrick1'))+
+  scale_x_discrete(c(0,0))+
+  xlab("Transcript ID")+
+  ylab("Enrichment Score")+
+  scale_y_continuous(expand=c(0,0))+
+  theme(axis.title.y = element_text(size = 22,face="bold"),axis.text.y = element_text(size = 18,face="bold"),axis.text.x = element_text(angle = 90, hjust = 1,face = "bold"))+
+  geom_hline(yintercept = 1.30103,linetype=2,col="red")
+```
+The following lines are used to generate the heatmap for Figure 6. The counts are converted into counts per million (CPM) for heatmap input. R package prettyheatmap is used in order to generate the heatmap. After plotting, a manual clustering method is used to determine the actual groupings done by pheatmap. 
+```{r}
+#Table formatting for interaction term heatmap. Formatting and CPM conversion. 
+load("FULLCOUNTTABLE.Rdata")
+Raw_CountTable<-counttable[,1:16]
+SUMS<-apply(Raw_CountTable,2,sum)
+CPM_Table<-sapply(1:16,function(x) Raw_CountTable[,x]/SUMS[x]*1000000)
+colnames(CPM_Table)=colnames(Raw_CountTable)
+rownames(CPM_Table)=rownames(Raw_CountTable)
+C_AM_Table<-CPM_Table[,1:4]
+C_PM_Table<-CPM_Table[,5:8]
+H_AM_Table<-CPM_Table[,9:12]
+H_PM_Table<-CPM_Table[,13:16]
+C_AM_Means<-apply(C_AM_Table,1,mean)
+C_PM_Means<-apply(C_PM_Table,1,mean)
+H_AM_Means<-apply(H_AM_Table,1,mean)
+H_PM_Means<-apply(H_PM_Table,1,mean)
+MeanCounts<-cbind(C_AM_Means,H_AM_Means,C_PM_Means,H_PM_Means)
+load("ITERM.Rdata")
+ItermGenes<-rownames(ITERMDEGenesPVAL)
+InputMatrix<-MeanCounts[ItermGenes,]
+colnames(InputMatrix)<-c("AM Control","AM Heat","PM Control","PM Heat")
+#The following line generates the actual heatmap plot.
+pheatmap(InputMatrix,cluster_cols = FALSE,scale = "row",cutree_rows = 5,color = colorRampPalette(c("white","dodgerblue"))(10),show_rownames = FALSE)
+#The following lines pull the data from pheatmap and then use a manual clustering method in order to determine which specific genes went into which cluster. 
+phOutput<-pheatmap(InputMatrix,cluster_cols = FALSE,scale = "row",cutree_rows = 5,color = colorRampPalette(c("white","dodgerblue"))(10),show_rownames = FALSE)
+phOutputOrdered<-InputMatrix[c(phOutput$tree_row[["order"]]),]
+a<-phOutput
+c=cor(t(InputMatrix))
+t=hclust(as.dist(1-c),method="complete")
+plot(t)
+#This cut height pay need to be adjusted in order to determine the correct cutoff to use to get desired results. The cut height selected here is designed to match the cut height which was determined by pheatmap.
+clusters3.2<-cutree(tree = a[[1]],h = 3.2)
+ExpClusters<-tapply(rownames(InputMatrix),INDEX = clusters3.2,function(x) InputMatrix[x,])
+lapply(ExpClusters,function(x) length(x[,1]))
+lapply(ExpClusters,function(x) apply(x,2,function(y) mean(y)))
+Group1<-ExpClusters[[2]]
+Group2<-ExpClusters[[4]]
+Group3<-ExpClusters[[1]]
+Group4<-ExpClusters[[5]]
+Group5<-ExpClusters[[3]]
+```
+The following lines were used to determine which genes from the interaction term analysis were correlated between their LDHH expression and LL_LDHH expression. First the lists of genes and expression values are combined into a table and then Pearson correlation is used to determine whether or not the expression in each condition is correlated. 
+```{r}
+load("FULLCOUNTTABLE.Rdata")
+C_AM_Means<-apply(counttable[,1:4],1,mean)
+C_PM_Means<-apply(counttable[,5:8],1,mean)
+H_AM_Means<-apply(counttable[,9:12],1,mean)
+H_PM_Means<-apply(counttable[,13:16],1,mean)
+ShortenedTable<-cbind(C_AM_Means,C_PM_Means,H_AM_Means,H_PM_Means)
+LL_ShortenedTable<-counttable[,17:20]
+load("ITERMGenes_ByGroup.Rdata")
+All_Names<-c(rownames(Group1),rownames(Group2),rownames(Group3),rownames(Group4),rownames(Group5))
+Reg_Iterm<-ShortenedTable[All_Names,]
+LL_Iterm<-LL_ShortenedTable[All_Names,]
+LL_Iterm<-as.matrix(LL_Iterm)
+CombinedTable<-cbind(Reg_Iterm,LL_Iterm)
+
+CorScores<-sapply(1:572, function(x) cor(CombinedTable[x,1:4],CombinedTable[x,5:8],method = "pearson"))
+
+LastTable<-cbind(CorScores,CombinedTable)
+LastTable<-as.data.frame(LastTable)
+LastTable_Loose<-LastTable[which(LastTable$CorScores>0.6),]
+LastTable_Strict<-LastTable[which(LastTable$CorScores>0.7),]
+```
+The follow lines contan the data formatting and plotting scripts for generating Figure 7. The values containing the expression values and SEM (normalized to control PM) are loaded in from a tab-delimited text file. The data table is then formatted for plotting in ggplot2. 
+```{r}
+LL_qPCR_Raw<-read.table(file = "LL_heatshock_controlnormalized.txt",sep="\t")
+LL_qPCR_Plot<-LL_qPCR_Raw[1:8,c(1,2,4,5)]
+
+colnames(LL_qPCR_Plot)=c("Gene","Condition","Data","SEM")
+LL_qPCR_Plot$Data <- as.numeric(as.character(LL_qPCR_Plot$Data))
+LL_qPCR_Plot$SEM <- as.numeric(as.character(LL_qPCR_Plot$SEM))
+LL_qPCR_Plot$Condition <- factor(LL_qPCR_Plot$Condition, levels = c("Control AM","Heat AM","Control PM","Heat PM"))
+Names<-c(rep("AT3G46230 (HSP17.4)",4),rep("AT3G59060 (PIF5)",4))
+LL_qPCR_Plot[,1]=Names
+LL_qPCR_Plot$Gene<-factor(LL_qPCR_Plot$Gene, levels = c("AT3G46230 (HSP17.4)","AT3G59060 (PIF5)"))
+LL_qPCR_Plot1<-LL_qPCR_Plot[1:4,]
+LL_qPCR_Plot2<-LL_qPCR_Plot[5:8,]
+
+ggplot(data=LL_qPCR_Plot2, aes(x=Gene, y=Data, fill=Condition)) +
+  geom_bar(stat="identity", color="black", position=position_dodge())+
+  theme_classic()+
+  theme(axis.title.x = element_text(size = 20),axis.title.y=element_text(size=20),axis.text.x = element_text(size=14),axis.text.y = element_text(size=14))+
+  scale_fill_manual(values=c('firebrick1','darkred','dodgerblue','dodgerblue4'))+
+  geom_errorbar(aes(ymin=Data-SEM, ymax=Data+SEM),
+                width=.2,
+                position=position_dodge(0.9))+
+  xlab("Transcript ID")+
+  ylab("Relative Expression")+
+  scale_y_continuous(expand=c(0,0),limits = c(0,5))
+```
+These lines load in all of the necessary data tables for Supplemental Figure 2. Expression data is downloaded from diurnal.mocklerlab.org and loaded in as a table. Lists of heat shock regulators and responders were previously identified in literature and are loaded in. Letter case is adjusted in the regulators list in order to match the expression data table for searching. 
+```{r}
+MocklerFull<-read.table(file="Arabidopsis_thaliana_data.tab",sep="\t",stringsAsFactors = FALSE)
+HSG_Regulators_Load<-read.table(file="HSG_Regulators.txt",sep="\t",stringsAsFactors = FALSE)
+HSG_Regulators_Load2<-data.frame(lapply(HSG_Regulators_Load, function(v) {
+  if (is.character(v)) return(toupper(v))
+  else return(v)
+}))
+HSG_Regulators<-as.vector(HSG_Regulators_Load2$V1)
+HSG_Responders_Load<-read.table(file="HSGs_GO.txt",sep="\t",stringsAsFactors = FALSE)
+HSG_Responders<-as.vector(HSG_Responders_Load$V1)
+HSG_Responders<-HSG_Responders[-1]
+```
+Phase enrichment is calculated using the MocklerPhaseEnrichment function. These functions calculates the enrichment of either responders or regulators at a cutoff which is inputted into the function. It is repeated through a range of 7 different cutoffs, and 4 data sets are analyzed for enrichment (2 diel and 2 circadian datasets). A vector is generated containing p-values at each cutoff for each dataset, and finally the vectors are combined into a table with all enrichment information.
+```{r}
+source('MocklerPhaseEnrichment.R')
+LL12_Reg<-vector(mode="numeric", length=0)
+LL23_Reg<-vector(mode="numeric", length=0)
+LDSM_Reg<-vector(mode="numeric", length=0)
+LDST_Reg<-vector(mode="numeric", length=0)
+CutoffIntervals<-c(0.6,0.65,0.7,0.75,0.8,0.85,0.9)
+for (i in CutoffIntervals)
+{
+  LL12_Reg<-c(LL12_Reg,MocklerEnrichReg("LL12_LDHH",i))
+}
+for (i in CutoffIntervals)
+{
+  LL23_Reg<-c(LL23_Reg,MocklerEnrichReg("LL23_LDHH",i))
+}
+for (i in CutoffIntervals)
+{
+  LDSM_Reg<-c(LDSM_Reg,MocklerEnrichReg("LDHH_SM",i))
+}
+for (i in CutoffIntervals)
+{
+  LDST_Reg<-c(LDST_Reg,MocklerEnrichReg("LDHH_ST",i))
+}
+RegulatorsPVAL<-rbind(LDSM_Reg,LDST_Reg,LL12_Reg,LL23_Reg)
+colnames(RegulatorsPVAL)=c("0.6","0.65","0.7","0.75","0.8","0.85","0.9")
+```
+Same code as above except using responder enrichment information in order to perform the calculations. 
+```{r}
+LL12_Resp<-vector(mode="numeric", length=0)
+LL23_Resp<-vector(mode="numeric", length=0)
+LDSM_Resp<-vector(mode="numeric", length=0)
+LDST_Resp<-vector(mode="numeric", length=0)
+for (i in CutoffIntervals)
+{
+  LL12_Resp<-c(LL12_Resp,MocklerEnrichResp("LL12_LDHH",i))
+}
+for (i in CutoffIntervals)
+{
+  LL23_Resp<-c(LL23_Resp,MocklerEnrichResp("LL23_LDHH",i))
+}
+for (i in CutoffIntervals)
+{
+  LDSM_Resp<-c(LDSM_Resp,MocklerEnrichResp("LDHH_SM",i))
+}
+for (i in CutoffIntervals)
+{
+  LDST_Resp<-c(LDST_Resp,MocklerEnrichResp("LDHH_ST",i))
+}
+
+RespondersPVAL<-rbind(LDSM_Resp,LDST_Resp,LL12_Resp,LL23_Resp)
+colnames(RespondersPVAL)=c("0.6","0.65","0.7","0.75","0.8","0.85","0.9")
+```
+The following lines prepare the regulators p-value table for plotting. Numerical data is converted into -log10 scale and the table is prepared for input into ggplot2.
+```{r}
+PlotMatrix<-RegulatorsPVAL[,5]
+PlotMatrixLOG10<--log(PlotMatrix,10)
+Names<-c("Diel Data 1","Diel Data 2","Circadian Data 1","Circadian Data 2")
+PlotMatrixLOG10<-rbind(PlotMatrixLOG10,Names)
+rownames(PlotMatrixLOG10)=c("Data","Names")
+PlotMatrixLOG10<-t(PlotMatrixLOG10)
+PlotMatrixLOG10<-as.data.frame(PlotMatrixLOG10)
+PlotMatrixLOG10$Data <- as.numeric(as.character(PlotMatrixLOG10$Data))
+PlotMatrixLOG10$Names<-factor(PlotMatrixLOG10$Names,levels=c("Diel Data 1","Diel Data 2","Circadian Data 1","Circadian Data 2"))
+PlotMatrixLOG10<-as.data.frame(PlotMatrixLOG10)
+```
+This is the ggplot2 script for generation of the regulator genes enrichment graph. 
+```{r}
+ggplot(data=PlotMatrixLOG10, aes(x=Names, y=Data)) +
+  geom_bar(stat="identity", color="black", position=position_dodge())+
+  theme_classic()+
+  xlab("Microarray Data Set")+
+  ylab("Enrichment Score: -log10(p-value)")+
+  theme(axis.text.x = element_text(face="bold", size=12),plot.title = element_text(hjust = 0.5,size = 30,face = "bold"))+
+  geom_hline(yintercept = 1.30103,linetype=2,col="red")+
+  scale_y_continuous(expand = c(0,0),limits = c(0,3))+
+  ggtitle("Enrichment of Cycling in \n Heat Response Regulators")
+```
+The following lines prepare the responders p-value table for plotting. Numerical data is converted into -log10 scale and the table is prepared for input into ggplot2. 
+```{r}
+PlotMatrix<-RespondersPVAL[,5]
+PlotMatrixLOG10<--log(PlotMatrix,10)
+Names<-c("Diel Data 1","Diel Data 2","Circadian Data 1","Circadian Data 2")
+PlotMatrixLOG10<-rbind(PlotMatrixLOG10,Names)
+rownames(PlotMatrixLOG10)=c("Data","Names")
+PlotMatrixLOG10<-t(PlotMatrixLOG10)
+PlotMatrixLOG10<-as.data.frame(PlotMatrixLOG10)
+PlotMatrixLOG10$Data <- as.numeric(as.character(PlotMatrixLOG10$Data))
+PlotMatrixLOG10$Names<-factor(PlotMatrixLOG10$Names,levels=c("Diel Data 1","Diel Data 2","Circadian Data 1","Circadian Data 2"))
+PlotMatrixLOG10<-as.data.frame(PlotMatrixLOG10)
+```
+This is the ggplot2 script for generation of the responder genes enrichment graph. 
+```{r}
+ggplot(data=PlotMatrixLOG10, aes(x=Names, y=Data)) +
+  geom_bar(stat="identity", color="black", position=position_dodge())+
+  theme_classic()+
+  xlab("Microarray Data Set")+
+  ylab("Enrichment Score: -log10(p-value)")+
+  theme(axis.text.x = element_text(face="bold", size=12),plot.title = element_text(hjust = 0.5,size = 30,face = "bold"))+
+  geom_hline(yintercept = 1.30103,linetype=2,col="red")+
+  scale_y_continuous(expand = c(0,0),limits = c(0,3))+
+  ggtitle("Enrichment of Cycling in \n Heat Response Genes")
+```
+Phaser data is first obtained by using the analysis tool at phaser.mocklerlab.org. This data is tabulated outside of R and compiled into a tab-delimited text file. First column contains the number of the phase, with following columns containing the phaser enrichment data for a specific array dataset. The dataset being plotted can be changed by altering the which data set is inputted as DatasetOI. Changing the number in the subset command allows for plotting of any of the data sets inputted. The table is then formatted for input into ggplot2.
+```{r}
+RawFullMockler<-read.table(file = "GG_Phaser_Input_Full80.txt",sep="\t",stringsAsFactors = FALSE)
+DatasetOI<-RawFullMockler[2:25,c(1,2)]
+Mockler_Matrix<-as.matrix(DatasetOI)
+colnames(Mockler_Matrix)=c("Phase","Data")
+Fig1Table<-as.data.frame(Mockler_Matrix)
+Fig1Table$Data <- as.numeric(as.character(Fig1Table$Data))
+Fig1Table$Phase <- as.numeric(as.character(Fig1Table$Phase))
+rownames(Fig1Table)=Fig1Table[,1]
+```
+ggplot2 command for plotting phaser data.
+```{r}
+ggplot(data=Fig1Table, aes(x=Phase, y=Data))+
+  geom_bar(stat="identity", color="black", position=position_dodge())+
+  theme_classic()+
+  xlab("Circadian Peak Phase")+
+  ylab("Enrichment Score: -log10(p-value)")+
+  scale_y_continuous(expand=c(0,0),limits=c(0,6))+
+  theme(axis.text.x = element_text(face="bold", size=12),plot.title = element_text(hjust = 0.5,size = 20,face = "bold"))+
+  scale_x_continuous(name = waiver(),breaks = seq(0,23,1),limits = c(-1,24))+
+  geom_hline(yintercept = 1.30103,linetype=2,col="red")+
+  geom_hline(yintercept = 2.0, linetype=1, col="red")+
+  geom_rect(mapping=aes(xmin=-.5, xmax=11.5, ymin=5.92, ymax=6),fill="white",size=0.3,color="black")+
+  geom_rect(mapping=aes(xmin=11.5, xmax=23.5, ymin=5.92, ymax=6),fill="black",size=0.3,color="black")+
+  ggtitle("Circadian Data 2")
+```
+Below is the script for generating Supplemental Figure 5. It stores the counttable generated in the differential analysis section as a temporary table and generates a histogram of the average counts per gene. Supplemental Figure 5 was made by running this script on the counttable before filtering and after filtering to generate each panel. 
+```{r}
+temptable<-FinalCountTable
+RowMeans<-data.frame(ID=rownames(temptable),AVG=rowMeans(temptable[,-1]))
+hist(log2(RowMeans$AVG),breaks=seq(-6,20,0.05))
+```
